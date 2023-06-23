@@ -1,0 +1,25 @@
+{
+  "name": "Lit",
+  "id": "1253959744483104113",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [
+    "codegen"
+  ],
+  "enableProposedApi": false,
+  "editorType": [
+    "dev"
+  ],
+  "ui": "ui.html",
+  "codegenLanguages": [
+    {
+      "label": "Language Label",
+      "value": "language-value"
+    }
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  }
+}
