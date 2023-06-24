@@ -1,16 +1,21 @@
 {
-  "name": "Lit",
+  "name": "figma-lit-exporter",
   "version": "1.0.0",
-  "description": "Your Figma Plugin",
+  "description": "Lit (Web Component) export for Figma",
   "main": "code.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "watch": "npm run build -- --watch"
+    "build": "esbuild code.ts --bundle --outfile=code.js --target=ES6",
+    "watch": "esbuild code.ts --bundle --outfile=code.js --target=ES6 --watch"
   },
   "author": "",
   "license": "",
   "devDependencies": {
     "@figma/plugin-typings": "*",
+    "esbuild": "^0.18.7",
     "typescript": "*"
+  },
+  "dependencies": {
+    "js-beautify": "^1.14.8",
+    "xml-formatter": "^3.4.1"
   }
 }

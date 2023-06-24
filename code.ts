@@ -1,11 +1,42 @@
-figma.codegen.on('generate', async (event) => {
-  const name = event.node.name;
-  const names = getUniqueNodeNames(event.node, {});
-  const css = await createCss(event.node, names);
-  const tokens = getTokens(event.node, []);
-  const html = await createHtml(event.node, names);
-  let code = template(name, css, html, tokens);
-  code = formatCode(code);
+import xmlFormat from "xml-formatter";
+
+figma.codegen.on("generate", async (event) => {
+  const outputType = figma.codegen.preferences.customSettings.outputType;
+  let code = "";
+  if (outputType === "single") {
+    const name = event.node.name;
+    const names = getUniqueNodeNames(event.node, {});
+    const css = await createCss(event.node, names, false, true);
+    const tokens = getTokens(event.node, []);
+    const html = await createHtml(event.node, names, false, true);
+    code = template([component(name, css, xmlFormat(html), tokens)]);
+  } else if (outputType === "multi") {
+    const topLevelComponents: SceneNode[] = [];
+    function findTopComponents(node: SceneNode) {
+      if (isComponent(node)) {
+        topLevelComponents.push(node);
+      }
+      if ("children" in node) {
+        node.children.forEach((child) => findTopComponents(child));
+      }
+    }
+    findTopComponents(event.node);
+
+    async function createComponent(node: SceneNode) {
+      const name = node.name;
+      const names = getUniqueNodeNames(node, {});
+      const css = await createCss(node, names, true, true);
+      const tokens = getTokens(node, []);
+      const html = await createHtml(node, names, true, true);
+      return component(name, css, xmlFormat(html), tokens);
+    }
+
+    const components = await Promise.all(
+      topLevelComponents.map((node) => createComponent(node))
+    );
+
+    code = template(components);
+  }
   return [
     {
       language: "TYPESCRIPT",
@@ -15,16 +46,24 @@ figma.codegen.on('generate', async (event) => {
   ];
 });
 
+function isComponent(node: SceneNode) {
+  return (
+    node.type === "COMPONENT" ||
+    node.type === "INSTANCE" ||
+    node.type === "FRAME"
+  );
+}
+
 function getTokens(node: SceneNode, tokens: string[]): string[] {
-  if ('children' in node) {
-    node.children.forEach(child => getTokens(child, tokens));
-  } else if ('characters' in node) {
+  if ("children" in node) {
+    node.children.forEach((child) => getTokens(child, tokens));
+  } else if ("characters" in node) {
     // tokens.push(node.characters);
     const str = node.characters;
-  if (str.includes('{{') && str.includes('}}')) {
+    if (str.includes("{{") && str.includes("}}")) {
       const results = str.match(/{{(.*?)}}/g);
       if (results) {
-        results.forEach(result => {
+        results.forEach((result) => {
           const token = propertyName(result.slice(2, -2));
           if (tokens.indexOf(token) === -1) {
             tokens.push(token);
@@ -36,44 +75,44 @@ function getTokens(node: SceneNode, tokens: string[]): string[] {
   return tokens;
 }
 
-async function createCss(node: SceneNode, names: NameMap): Promise<string> {
-  const css = await node.getCSSAsync();
-
-  let result = '';
-
-  if ('children' in node) {
-    result += await Promise.all(node.children.map(child => createCss(child, names))).then(children => children.join(''));
+async function createHtml(
+  node: SceneNode,
+  names: NameMap,
+  multi: boolean,
+  root: boolean
+): Promise<string> {
+  if (multi && isComponent(node) && !root) {
+    const name = Object.keys(names).find((key) => names[key] === node)!;
+    let props = "";
+    const tokens = getTokens(node, []);
+    if (tokens.length > 0) {
+      for (const token of tokens) {
+        props += ` ${token}="\${this.${token}}"`;
+      }
+    }
+    const tag = tagName(name);
+    return `<${tag}${props}></${tag}>`;
   }
-
-  const name = Object.keys(names).find(key => names[key] === node);
-  result += `.${name} {`;
-  for (const key in css) {
-    result += `${key}: ${css[key]};`;
-  }
-  result += '}';
-
-  return result;
-}
-
-async function createHtml(node: SceneNode, names: NameMap): Promise<string> {
-  const className = Object.keys(names).find(key => names[key] === node);
+  const className = Object.keys(names).find((key) => names[key] === node);
   const styles = `class="${className}"`;
   const start = `<div ${styles}>`;
-  const end = '</div>';
+  const end = "</div>";
 
-  if ('children' in node) {
-    const children = await Promise.all(node.children.map(child => createHtml(child, names)));
-    return `${start}${children.join('')}${end}`;
+  if ("children" in node) {
+    const children = await Promise.all(
+      node.children.map((child) => createHtml(child, names, multi, false))
+    );
+    return `${start}${children.join("\n")}${end}`;
   }
 
-  if ('characters' in node) {
+  if ("characters" in node) {
     let str = node.characters;
 
     // Replace {{tokens}} with ${this.tokens}
-    if (str.includes('{{') && str.includes('}}')) {
+    if (str.includes("{{") && str.includes("}}")) {
       const results = str.match(/{{(.*?)}}/g);
       if (results) {
-        results.forEach(result => {
+        results.forEach((result) => {
           const token = propertyName(result.slice(2, -2));
           str = str.replace(result, `\${this.${token}}`);
         });
@@ -86,18 +125,59 @@ async function createHtml(node: SceneNode, names: NameMap): Promise<string> {
   return `${start}${node.name}${end}`;
 }
 
-const template = (name: string, css: string, html: string, tokens: string[]) => `
+async function createCss(
+  node: SceneNode,
+  names: NameMap,
+  multi: boolean,
+  root: boolean
+): Promise<string> {
+  if (multi && isComponent(node) && !root) {
+    return ``;
+  }
+
+  const css = await node.getCSSAsync();
+
+  let result = "";
+
+  const name = Object.keys(names).find((key) => names[key] === node);
+  result += `.${name} {\n`;
+  for (const key in css) {
+    result += `   ${key}: ${css[key]};\n`;
+  }
+  result += "}\n";
+
+  if ("children" in node) {
+    result += await Promise.all(
+      node.children.map((child) => createCss(child, names, multi, false))
+    ).then((children) => children.join("\n"));
+  }
+
+  return result;
+}
+
+const template = (body: string[]) =>
+  `
 import {html, css, LitElement} from 'lit';
 import {customElement, property} from 'lit/decorators.js';
 
+${body.join("\n\n")}
+`.trim();
+
+const component = (name: string, css: string, html: string, tokens: string[]) =>
+  `
 @customElement('${tagName(name)}')
 export class ${className(name)} extends LitElement {
-  static styles = css\`${css}\`;
+  static styles = css\`
+${css}\`;
 
-  ${tokens.map(token => `@property({type: String}) ${token} = '';`).join('\n  ')}
+  ${tokens
+    .map((token) => `@property({type: String}) ${token} = '';`)
+    .join("\n  ")}
 
   render() {
-    return html\`${html}\`;
+    return html\`
+${xmlFormat(html)}
+\`;
   }
 }
 `.trim();
@@ -105,12 +185,12 @@ export class ${className(name)} extends LitElement {
 function className(str: string) {
   // Convert raw name to PascalCase
   let result = str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, '$')
-    .split('$')
+    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
+    .split("$")
     .map((x) => x[0].toUpperCase() + x.slice(1))
-    .join('');
-  if (!result.endsWith('Element')) {
-    result += 'Element';
+    .join("");
+  if (!result.endsWith("Element")) {
+    result += "Element";
   }
   return result;
 }
@@ -118,12 +198,12 @@ function className(str: string) {
 function tagName(str: string) {
   // Convert raw name to kebab-case
   let result = str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, '$')
-    .split('$')
+    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
+    .split("$")
     .map((x) => x.toLowerCase())
-    .join('-');
-  if (!result.endsWith('-element')) {
-    result += '-element';
+    .join("-");
+  if (!result.endsWith("-element")) {
+    result += "-element";
   }
   return result;
 }
@@ -131,33 +211,24 @@ function tagName(str: string) {
 function propertyName(str: string) {
   // Convert raw name to camelCase
   return str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, '$')
-    .split('$')
+    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
+    .split("$")
     .map((x, i) => (i ? x[0].toUpperCase() + x.slice(1) : x))
-    .join('');
+    .join("");
 }
 
-interface NameMap { [key: string]: SceneNode }
+interface NameMap {
+  [key: string]: SceneNode;
+}
 
 function getUniqueNodeNames(node: SceneNode, names: NameMap): NameMap {
-  if ('children' in node) {
-    node.children.forEach(child => getUniqueNodeNames(child, names));
+  if ("children" in node) {
+    node.children.forEach((child) => getUniqueNodeNames(child, names));
   }
   let name = tagName(node.name);
   while (names[name]) {
-    name += '_';
+    name += "_";
   }
   names[name] = node;
   return names;
-}
-
-
-function formatCode(str: string) {
-  const regex = /(?<=\n|^)(\s*)(?=\S)/g;
-
-  const formattedCode = str.replace(regex, function (match) {
-    return match.toLowerCase();
-  });
-
-  return formattedCode;
 }

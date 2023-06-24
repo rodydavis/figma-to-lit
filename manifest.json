@@ -1,5 +1,5 @@
 {
-  "name": "Lit",
+  "name": "Figma to Lit",
   "id": "1253959744483104113",
   "api": "1.0.0",
   "main": "code.js",
@@ -11,10 +11,27 @@
     "dev"
   ],
   "ui": "ui.html",
+  "codegenPreferences": [
+    {
+      "itemType": "select",
+      "propertyName": "outputType",
+      "label": "Output Type",
+      "options": [
+        {
+          "label": "Single Web Component",
+          "value": "single", "isDefault": true
+        },
+        {
+          "label": "Separate Web Components",
+          "value": "multi"
+        }
+      ]
+    }
+  ],
   "codegenLanguages": [
     {
-      "label": "Language Label",
-      "value": "language-value"
+      "label": "Lit",
+      "value": "typescript"
     }
   ],
   "networkAccess": {
