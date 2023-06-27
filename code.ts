@@ -1,4 +1,4 @@
-import { camelCase, paramCase, pascalCase } from "change-case";
+import { camelCase, paramCase, pascalCase, snakeCase } from "change-case";
 // @ts-ignore
 import Mustache from 'mustache';
 
@@ -18,8 +18,36 @@ figma.codegen.on("generate", async (event) => {
   ];
 });
 
+const names = new Map<string, SceneNode | Variable>();
+
+function uniqueName(node: SceneNode | Variable) {
+  for (const [key, value] of names) {
+    if (value.id === node.id) {
+      return key;
+    }
+  }
+  function getName() {
+    let target = node.name;
+    if (target.includes('#')) {
+      target = target.split('#')[0];
+    }
+    return pascalCase(target);
+  }
+  let target = getName();
+  let count = 0;
+  while (true) {
+    if (!names.has(target)) {
+      names.set(target, node);
+      break;
+    }
+    target = `${getName()}${++count}`;
+  }
+  console.log(node, target);
+  return target;
+}
+
 function normalize(str: string) {
-  const regex = /[^\w\s]/g;
+  const regex = /[^\w\s\d]/g;
   return str.replace(regex, '');
 }
 
@@ -77,6 +105,12 @@ export class {{name}} extends LitElement {
   @property({type: {{type}}}) {{name}} = {{value}};
   {{/properties}}
 
+  {{#events}}
+  {{name}}(e: {{type}}) {
+    console.log('{{name}} {{type}}', e);
+  }
+  {{/events}}
+
   render() {
     return html\`
 {{#xml}}{{node}}{{/xml}}
@@ -115,6 +149,12 @@ export class {{name}} extends LitElement {
     {{/properties}}
   }
 
+  {{#events}}
+  {{name}}(e: {{type}}) {
+    console.log('{{name}} {{type}}', e);
+  }
+  {{/events}}
+
   render() {
     return html\`
 {{#xml}}{{node}}{{/xml}}
@@ -134,6 +174,7 @@ interface LitComponent {
   name: string;
   styles: LitStyle[];
   properties: LitProperty[];
+  events: LitEvent[];
   node: LitNode;
 }
 
@@ -145,6 +186,11 @@ interface LitStyle {
 interface LitStyleAttribute {
   key: string;
   value: string;
+}
+
+interface LitEvent {
+  type: string;
+  name: string;
 }
 
 interface LitProperty {
@@ -168,6 +214,7 @@ async function createTemplate(node: SceneNode): Promise<LitTemplate> {
     // const globalAttrs = getNodeProperties(target, { recursive: true });
     if (isComponent(target) || target === node) {
       const styles: LitStyle[] = [];
+      const events: LitEvent[] = [];
       const properties: LitProperty[] = [];
 
       async function addStyle(child: SceneNode) {
@@ -175,7 +222,7 @@ async function createTemplate(node: SceneNode): Promise<LitTemplate> {
 
         const css = await child.getCSSAsync();
         styles.push({
-          selector: tagName(child.name),
+          selector: tagName(uniqueName(child)),
           attributes: Object.entries(css).map((([key, value]) => ({ key, value })))
         });
 
@@ -197,11 +244,39 @@ async function createTemplate(node: SceneNode): Promise<LitTemplate> {
         });
       }
 
+      function addEvents(child: SceneNode) {
+        if ('reactions' in child) {
+          const reactions = child.reactions;
+          for (const item of reactions) {
+            if (item.trigger) {
+              const type = item.trigger.type;
+              if (type === 'ON_CLICK') {
+                const eventName = propertyName(`${snakeCase(uniqueName(child))}-${type}`);
+                events.push({
+                  name: eventName,
+                  type: 'Event',
+                });
+              }
+            }
+          }
+        }
+        if ('children' in child) {
+          for (const item of child.children) {
+            if (!isComponent(item)) {
+              addEvents(item);
+            }
+          }
+        }
+      }
+
+      addEvents(target);
+
       const component: LitComponent = {
         node: nodeTree(target),
-        name: className(target.name),
-        tag: tagName(target.name),
+        name: className(uniqueName(target)),
+        tag: tagName(uniqueName(target)),
         styles,
+        events,
         properties,
       };
       components.push(component);
@@ -233,9 +308,11 @@ function renderXml(node: LitNode) {
     }
     sb.push(`</${node.tag}>`)
   } else {
+    let events = false;
     let element = 'div';
     if ('reactions' in node.node) {
       const reactions = node.node.reactions;
+      events = reactions.length > 0;
       for (const item of reactions) {
         if (item.trigger) {
           if (
@@ -249,7 +326,24 @@ function renderXml(node: LitNode) {
         }
       }
     }
-    sb.push(`<${element} class="${node.tag}">`)
+    if (events) {
+      sb.push(`<${element} class="${node.tag}"`)
+      if ('reactions' in node.node) {
+        const reactions = node.node.reactions;
+        for (const item of reactions) {
+          if (item.trigger) {
+            const type = item.trigger.type;
+            if (type === 'ON_CLICK') {
+              const eventName = propertyName(`${snakeCase(uniqueName(node.node))}-${type}`);
+              sb.push(`   @click=\${this.${eventName}}`);
+            }
+          }
+        }
+      }
+      sb.push(`>`)
+    } else {
+      sb.push(`<${element} class="${node.tag}">`)
+    }
     if (node.children) {
       for (const child of node.children) {
         if (typeof child === 'string') {
@@ -257,7 +351,7 @@ function renderXml(node: LitNode) {
           if (node.node.boundVariables?.characters) {
             const variable = figma.variables.getVariableById(node.node.boundVariables.characters.id);
             if (variable) {
-              sb.push(`   \${this.${propertyName(variable.name)}}`);
+              sb.push(`   \${this.${propertyName(uniqueName(variable))}}`);
               bound = true;
             }
           } else if (node.node.componentPropertyReferences?.characters) {
@@ -311,7 +405,7 @@ function getNodeProperties(node: SceneNode, options?: {
     if (variables?.characters) {
       const variable = figma.variables.getVariableById(variables.characters.id);
       if (variable) {
-        attributes[variable.name] = '';
+        attributes[uniqueName(variable)] = '';
       }
     }
   }
@@ -351,7 +445,7 @@ function nodeTree(node: SceneNode, root: boolean = true): LitNode {
   }
   return {
     node,
-    tag: tagName(node.name),
+    tag: tagName(uniqueName(node)),
     children: children.length === 0 ? (str ? [str] : null) : children,
     attributes: attrs.length === 0 ? null : attrs,
     component: isComponent(node) && !root,
