@@ -11,11 +11,14 @@
   "license": "",
   "devDependencies": {
     "@figma/plugin-typings": "*",
+    "@types/mustache": "^4.2.2",
     "esbuild": "^0.18.7",
     "typescript": "*"
   },
   "dependencies": {
+    "change-case": "^4.1.2",
     "js-beautify": "^1.14.8",
+    "mustache": "^4.2.0",
     "xml-formatter": "^3.4.1"
   }
 }

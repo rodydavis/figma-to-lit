@@ -1,234 +1,367 @@
-import xmlFormat from "xml-formatter";
+import { camelCase, paramCase, pascalCase } from "change-case";
+// @ts-ignore
+import Mustache from 'mustache';
 
 figma.codegen.on("generate", async (event) => {
-  const outputType = figma.codegen.preferences.customSettings.outputType;
-  let code = "";
-  if (outputType === "single") {
-    const name = event.node.name;
-    const names = getUniqueNodeNames(event.node, {});
-    const css = await createCss(event.node, names, false, true);
-    const tokens = getTokens(event.node, []);
-    const html = await createHtml(event.node, names, false, true);
-    code = template([component(name, css, xmlFormat(html), tokens)]);
-  } else if (outputType === "multi") {
-    const topLevelComponents: SceneNode[] = [];
-    function findTopComponents(node: SceneNode) {
-      if (isComponent(node)) {
-        topLevelComponents.push(node);
-      }
-      if ("children" in node) {
-        node.children.forEach((child) => findTopComponents(child));
-      }
-    }
-    findTopComponents(event.node);
-
-    async function createComponent(node: SceneNode) {
-      const name = node.name;
-      const names = getUniqueNodeNames(node, {});
-      const css = await createCss(node, names, true, true);
-      const tokens = getTokens(node, []);
-      const html = await createHtml(node, names, true, true);
-      return component(name, css, xmlFormat(html), tokens);
-    }
-
-    const components = await Promise.all(
-      topLevelComponents.map((node) => createComponent(node))
-    );
-
-    code = template(components);
-  }
+  const args = await createTemplate(event.node);
   return [
     {
       language: "TYPESCRIPT",
-      code,
-      title: "Lit Element",
+      code: renderTemplate(args, true),
+      title: "Lit (TS)",
+    },
+    {
+      language: "JAVASCRIPT",
+      code: renderTemplate(args, false),
+      title: "Lit (JS)",
     },
   ];
 });
+
+function normalize(str: string) {
+  const regex = /[^\w\s]/g;
+  return str.replace(regex, '');
+}
+
+function className(str: string) {
+  // Convert raw name to PascalCase
+  let result = normalize(str);
+  if (/^\d/.test(str)) {
+    result = `X ${result}`;
+  }
+  if (!result.endsWith("Element")) {
+    result += " Element";
+  }
+  return pascalCase(result);
+}
+
+function tagName(str: string) {
+  // Convert raw name to kebab-case
+  let result = normalize(str.trim());
+  if (/^\d/.test(str)) {
+    result = `x-${result}`;
+  }
+  result = paramCase(result);
+  if (!result.endsWith("-element")) {
+    result += "-element";
+  }
+  return paramCase(result);
+}
+
+function propertyName(str: string) {
+  let result = normalize(str);
+  if (/^\d/.test(str)) {
+    result = `x-${result}`;
+  }
+  return camelCase(result);
+}
+
+const litTSTemplate = `
+import {html, css, LitElement} from 'lit';
+import {customElement, property} from 'lit/decorators.js';
+
+{{#components}}
+@customElement('{{tag}}')
+export class {{name}} extends LitElement {
+  static styles = css\`
+  {{#styles}}
+  .{{selector}} {
+    {{#attributes}}
+    {{key}}: {{value}};
+    {{/attributes}}
+  }
+  {{/styles}}
+  \`;
+
+  {{#properties}}
+  @property({type: {{type}}}) {{name}} = {{value}};
+  {{/properties}}
+
+  render() {
+    return html\`
+{{#xml}}{{node}}{{/xml}}
+    \`;
+  }
+}
+
+{{/components}}
+`.trim();
+
+const litJSTemplate = `
+import {html, css, LitElement} from 'lit';
+
+{{#components}}
+export class {{name}} extends LitElement {
+  static styles = css\`
+  {{#styles}}
+  .{{selector}} {
+    {{#attributes}}
+    {{key}}: {{value}};
+    {{/attributes}}
+  }
+  {{/styles}}
+  \`;
+
+  static properties = {
+    {{#properties}}
+    {{name}}: {type: {{type}}},
+    {{/properties}}
+  };
+
+  constructor() {
+    super();
+    {{#properties}}
+    this.{{name}} = {{value}};
+    {{/properties}}
+  }
+
+  render() {
+    return html\`
+{{#xml}}{{node}}{{/xml}}
+    \`;
+  }
+}
+customElements.define('{{tag}}', {{name}});
+{{/components}}
+`.trim();
+
+interface LitTemplate {
+  components: LitComponent[];
+}
+
+interface LitComponent {
+  tag: string;
+  name: string;
+  styles: LitStyle[];
+  properties: LitProperty[];
+  node: LitNode;
+}
+
+interface LitStyle {
+  selector: string;
+  attributes: LitStyleAttribute[];
+}
+
+interface LitStyleAttribute {
+  key: string;
+  value: string;
+}
+
+interface LitProperty {
+  type: string;
+  name: string;
+  value: string;
+}
+
+interface LitNode {
+  tag: string;
+  attributes: LitStyleAttribute[] | null;
+  children: LitNode[] | string[] | null;
+  component: boolean;
+  node: SceneNode,
+}
+
+async function createTemplate(node: SceneNode): Promise<LitTemplate> {
+  const components: LitComponent[] = [];
+
+  async function addComponent(target: SceneNode) {
+    // const globalAttrs = getNodeProperties(target, { recursive: true });
+    if (isComponent(target) || target === node) {
+      const styles: LitStyle[] = [];
+      const properties: LitProperty[] = [];
+
+      async function addStyle(child: SceneNode) {
+        if (isComponent(child) && target !== child) return;
+
+        const css = await child.getCSSAsync();
+        styles.push({
+          selector: tagName(child.name),
+          attributes: Object.entries(css).map((([key, value]) => ({ key, value })))
+        });
+
+        if ('children' in child) {
+          for (const item of child.children) {
+            await addStyle(item);
+          }
+        }
+      }
+
+      await addStyle(target);
+
+      const attrs = getNodeProperties(target, { recursive: true });
+      for (const [key, value] of Object.entries({ ...attrs })) {
+        properties.push({
+          type: 'String',
+          name: propertyName(key),
+          value: typeof value === 'string' ? `'${value}'` : value,
+        });
+      }
+
+      const component: LitComponent = {
+        node: nodeTree(target),
+        name: className(target.name),
+        tag: tagName(target.name),
+        styles,
+        properties,
+      };
+      components.push(component);
+
+      if ('children' in target) {
+        for (const child of target.children) {
+          await addComponent(child);
+        }
+      }
+    }
+  }
+
+  await addComponent(node);
+
+  return { components };
+}
+
+function renderXml(node: LitNode) {
+  const sb: string[] = [];
+  if (node.component) {
+    if (node.attributes) {
+      sb.push(`<${node.tag} `)
+      for (const attr of node.attributes) {
+        sb.push(`   ${propertyName(attr.key)}=\${this.${propertyName(attr.key)}} `)
+      }
+      sb.push(`>`)
+    } else {
+      sb.push(`<${node.tag}>`)
+    }
+    sb.push(`</${node.tag}>`)
+  } else {
+    let element = 'div';
+    if ('reactions' in node.node) {
+      const reactions = node.node.reactions;
+      for (const item of reactions) {
+        if (item.trigger) {
+          if (
+            item.trigger.type === "ON_CLICK" ||
+            item.trigger.type === "ON_HOVER" ||
+            item.trigger.type === "ON_PRESS" ||
+            item.trigger.type === "MOUSE_DOWN"
+          ) {
+            element = 'button';
+          }
+        }
+      }
+    }
+    sb.push(`<${element} class="${node.tag}">`)
+    if (node.children) {
+      for (const child of node.children) {
+        if (typeof child === 'string') {
+          let bound = false;
+          if (node.node.boundVariables?.characters) {
+            const variable = figma.variables.getVariableById(node.node.boundVariables.characters.id);
+            if (variable) {
+              sb.push(`   \${this.${propertyName(variable.name)}}`);
+              bound = true;
+            }
+          } else if (node.node.componentPropertyReferences?.characters) {
+            const label = node.node.componentPropertyReferences.characters.split('#')[0];
+            sb.push(`   \${this.${propertyName(label)}}`);
+            bound = true;
+          }
+          if (!bound) sb.push(`   ${child}`);
+        } else {
+          sb.push(`   ${renderXml(child)}`);
+        }
+      }
+    }
+    sb.push(`</${element}>`)
+  }
+  return sb.join('\n');
+}
+
+function renderTemplate(args: LitTemplate, typescript: boolean = true) {
+  const template = typescript ? litTSTemplate : litJSTemplate;
+  Mustache.escape = function (text: string) { return text; };
+  return Mustache.render(template, {
+    ...args,
+    "xml": function () {
+      return () => renderXml(this.node);
+    }
+  });
+}
+
+function getNodeProperties(node: SceneNode, options?: {
+  recursive?: boolean
+}) {
+  const attributes: { [key: string]: string } = {};
+
+  if (node.type === 'COMPONENT') {
+    const properties = node.componentPropertyDefinitions;
+    for (const [key, value] of Object.entries(properties)) {
+      const label = key.split('#')[0];
+      attributes[label] = `${value.defaultValue}`;
+    }
+  }
+  if (node.type === 'INSTANCE') {
+    const properties = node.componentProperties;
+    for (const [key, value] of Object.entries(properties)) {
+      const label = key.split('#')[0];
+      attributes[label] = `${value.value}`;
+    }
+  }
+  if (node.boundVariables) {
+    const variables = node.boundVariables!
+    if (variables?.characters) {
+      const variable = figma.variables.getVariableById(variables.characters.id);
+      if (variable) {
+        attributes[variable.name] = '';
+      }
+    }
+  }
+
+  const references = node.componentPropertyReferences;
+  if (references?.characters) {
+    const label = references.characters.split('#')[0];
+    attributes[label] = attributes[label] ?? label;
+  }
+
+  if (options?.recursive) {
+    if ('children' in node) {
+      for (const child of node.children) {
+        const attrs = getNodeProperties(child, { recursive: true });
+        for (const [key, value] of Object.entries(attrs)) {
+          attributes[key] = value;
+        }
+      }
+    }
+  }
+
+  return attributes;
+}
+
+function nodeTree(node: SceneNode, root: boolean = true): LitNode {
+  const children: LitNode[] = [];
+  const attributes = getNodeProperties(node, { recursive: true });
+  if ('children' in node) {
+    for (const child of node.children) {
+      children.push(nodeTree(child, false));
+    }
+  }
+  const attrs = Object.entries(attributes).map(([key, value]) => ({ key, value }));
+  let str: string | null = null;
+  if ('characters' in node) {
+    str = node.characters;
+  }
+  return {
+    node,
+    tag: tagName(node.name),
+    children: children.length === 0 ? (str ? [str] : null) : children,
+    attributes: attrs.length === 0 ? null : attrs,
+    component: isComponent(node) && !root,
+  };
+}
 
 function isComponent(node: SceneNode) {
   return (
     node.type === "COMPONENT" ||
     node.type === "INSTANCE" ||
-    node.type === "FRAME"
+    node.type === 'FRAME'
   );
-}
-
-function getTokens(node: SceneNode, tokens: string[]): string[] {
-  if ("children" in node) {
-    node.children.forEach((child) => getTokens(child, tokens));
-  } else if ("characters" in node) {
-    // tokens.push(node.characters);
-    const str = node.characters;
-    if (str.includes("{{") && str.includes("}}")) {
-      const results = str.match(/{{(.*?)}}/g);
-      if (results) {
-        results.forEach((result) => {
-          const token = propertyName(result.slice(2, -2));
-          if (tokens.indexOf(token) === -1) {
-            tokens.push(token);
-          }
-        });
-      }
-    }
-  }
-  return tokens;
-}
-
-async function createHtml(
-  node: SceneNode,
-  names: NameMap,
-  multi: boolean,
-  root: boolean
-): Promise<string> {
-  if (multi && isComponent(node) && !root) {
-    const name = Object.keys(names).find((key) => names[key] === node)!;
-    let props = "";
-    const tokens = getTokens(node, []);
-    if (tokens.length > 0) {
-      for (const token of tokens) {
-        props += ` ${token}="\${this.${token}}"`;
-      }
-    }
-    const tag = tagName(name);
-    return `<${tag}${props}></${tag}>`;
-  }
-  const className = Object.keys(names).find((key) => names[key] === node);
-  const styles = `class="${className}"`;
-  const start = `<div ${styles}>`;
-  const end = "</div>";
-
-  if ("children" in node) {
-    const children = await Promise.all(
-      node.children.map((child) => createHtml(child, names, multi, false))
-    );
-    return `${start}${children.join("\n")}${end}`;
-  }
-
-  if ("characters" in node) {
-    let str = node.characters;
-
-    // Replace {{tokens}} with ${this.tokens}
-    if (str.includes("{{") && str.includes("}}")) {
-      const results = str.match(/{{(.*?)}}/g);
-      if (results) {
-        results.forEach((result) => {
-          const token = propertyName(result.slice(2, -2));
-          str = str.replace(result, `\${this.${token}}`);
-        });
-      }
-    }
-
-    return `<span ${styles}>${str}</span>`;
-  }
-
-  return `${start}${node.name}${end}`;
-}
-
-async function createCss(
-  node: SceneNode,
-  names: NameMap,
-  multi: boolean,
-  root: boolean
-): Promise<string> {
-  if (multi && isComponent(node) && !root) {
-    return ``;
-  }
-
-  const css = await node.getCSSAsync();
-
-  let result = "";
-
-  const name = Object.keys(names).find((key) => names[key] === node);
-  result += `.${name} {\n`;
-  for (const key in css) {
-    result += `   ${key}: ${css[key]};\n`;
-  }
-  result += "}\n";
-
-  if ("children" in node) {
-    result += await Promise.all(
-      node.children.map((child) => createCss(child, names, multi, false))
-    ).then((children) => children.join("\n"));
-  }
-
-  return result;
-}
-
-const template = (body: string[]) =>
-  `
-import {html, css, LitElement} from 'lit';
-import {customElement, property} from 'lit/decorators.js';
-
-${body.join("\n\n")}
-`.trim();
-
-const component = (name: string, css: string, html: string, tokens: string[]) =>
-  `
-@customElement('${tagName(name)}')
-export class ${className(name)} extends LitElement {
-  static styles = css\`
-${css}\`;
-
-  ${tokens
-    .map((token) => `@property({type: String}) ${token} = '';`)
-    .join("\n  ")}
-
-  render() {
-    return html\`
-${xmlFormat(html)}
-\`;
-  }
-}
-`.trim();
-
-function className(str: string) {
-  // Convert raw name to PascalCase
-  let result = str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
-    .split("$")
-    .map((x) => x[0].toUpperCase() + x.slice(1))
-    .join("");
-  if (!result.endsWith("Element")) {
-    result += "Element";
-  }
-  return result;
-}
-
-function tagName(str: string) {
-  // Convert raw name to kebab-case
-  let result = str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
-    .split("$")
-    .map((x) => x.toLowerCase())
-    .join("-");
-  if (!result.endsWith("-element")) {
-    result += "-element";
-  }
-  return result;
-}
-
-function propertyName(str: string) {
-  // Convert raw name to camelCase
-  return str
-    .replace(/^[^a-z]+|[^\w:.-]+/gi, "$")
-    .split("$")
-    .map((x, i) => (i ? x[0].toUpperCase() + x.slice(1) : x))
-    .join("");
-}
-
-interface NameMap {
-  [key: string]: SceneNode;
-}
-
-function getUniqueNodeNames(node: SceneNode, names: NameMap): NameMap {
-  if ("children" in node) {
-    node.children.forEach((child) => getUniqueNodeNames(child, names));
-  }
-  let name = tagName(node.name);
-  while (names[name]) {
-    name += "_";
-  }
-  names[name] = node;
-  return names;
 }
